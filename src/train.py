@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
 
@@ -25,9 +26,9 @@ print("Using Device:", device)
 
 train_dataset = DehazingDataset(
 
-    hazy_dir="datasets/train/hazy",
+    hazy_dir="datasets_small/train/hazy",
 
-    clean_dir="datasets/train/clean",
+    clean_dir="datasets_small/train/clear",
 
     image_size=256
 )
@@ -36,7 +37,7 @@ train_loader = DataLoader(
 
     train_dataset,
 
-    batch_size=2,
+    batch_size=1,
 
     shuffle=True
 )
@@ -48,20 +49,14 @@ train_loader = DataLoader(
 
 model = HITFormer().to(device)
 
+print("Model Loaded Successfully!")
+
 
 # ---------------------------------------------------
 # PSNR Loss
 # ---------------------------------------------------
 
 class PSNRLoss(nn.Module):
-
-    """
-    Negative PSNR Loss
-
-    Higher PSNR = better image
-
-    So we minimize negative PSNR.
-    """
 
     def __init__(self):
 
@@ -82,7 +77,65 @@ class PSNRLoss(nn.Module):
         return -psnr
 
 
-criterion = PSNRLoss()
+# ---------------------------------------------------
+# SSIM Loss
+# ---------------------------------------------------
+
+class SSIMLoss(nn.Module):
+
+    """
+    Lightweight SSIM approximation
+    """
+
+    def __init__(self):
+
+        super().__init__()
+
+    def forward(self, pred, target):
+
+        mu_x = pred.mean()
+
+        mu_y = target.mean()
+
+        sigma_x = pred.var()
+
+        sigma_y = target.var()
+
+        sigma_xy = ((pred - mu_x) * (target - mu_y)).mean()
+
+        C1 = 0.01 ** 2
+
+        C2 = 0.03 ** 2
+
+        ssim = (
+
+            (2 * mu_x * mu_y + C1)
+
+            *
+
+            (2 * sigma_xy + C2)
+
+        ) / (
+
+            (mu_x ** 2 + mu_y ** 2 + C1)
+
+            *
+
+            (sigma_x + sigma_y + C2)
+        )
+
+        return 1 - ssim
+
+
+# ---------------------------------------------------
+# Loss Functions
+# ---------------------------------------------------
+
+l1_loss = nn.L1Loss()
+
+psnr_loss = PSNRLoss()
+
+ssim_loss = SSIMLoss()
 
 
 # ---------------------------------------------------
@@ -93,15 +146,15 @@ optimizer = torch.optim.Adam(
 
     model.parameters(),
 
-    lr=1e-4
+    lr=5e-5
 )
 
 
 # ---------------------------------------------------
-# Training Settings
+# Epochs
 # ---------------------------------------------------
 
-epochs = 10
+epochs = 8
 
 
 # ---------------------------------------------------
@@ -113,6 +166,8 @@ for epoch in range(epochs):
     model.train()
 
     epoch_loss = 0.0
+
+    print(f"\nStarting Epoch {epoch+1}/{epochs}\n")
 
     for batch_idx, (hazy, clean) in enumerate(train_loader):
 
@@ -128,10 +183,43 @@ for epoch in range(epochs):
         output = model(hazy)
 
         # ---------------------------------------------------
-        # Loss
+        # Combined Loss
         # ---------------------------------------------------
 
-        loss = criterion(output, clean)
+        loss_l1 = l1_loss(
+
+            output,
+
+            clean
+        )
+
+        loss_psnr = psnr_loss(
+
+            output,
+
+            clean
+        )
+
+        loss_ssim = ssim_loss(
+
+            output,
+
+            clean
+        )
+
+        # Final Combined Loss
+        loss = (
+
+            1.0 * loss_l1
+
+            +
+
+            0.1 * loss_psnr
+
+            +
+
+            0.5 * loss_ssim
+        )
 
         # ---------------------------------------------------
         # Backpropagation
@@ -141,21 +229,30 @@ for epoch in range(epochs):
 
         loss.backward()
 
+        # Gradient Clipping
+        torch.nn.utils.clip_grad_norm_(
+
+            model.parameters(),
+
+            max_norm=1.0
+        )
+
         optimizer.step()
 
-        # Accumulate loss
+        # ---------------------------------------------------
+        # Logging
+        # ---------------------------------------------------
+
         epoch_loss += loss.item()
 
-        # ---------------------------------------------------
-        # Batch Logging
-        # ---------------------------------------------------
-
-        if batch_idx % 10 == 0:
+        if batch_idx % 100 == 0:
 
             print(
 
                 f"Epoch [{epoch+1}/{epochs}] "
-                f"Batch [{batch_idx}] "
+
+                f"Batch [{batch_idx}/{len(train_loader)}] "
+
                 f"Loss: {loss.item():.4f}"
             )
 
@@ -168,19 +265,38 @@ for epoch in range(epochs):
     print(
 
         f"\nEpoch {epoch+1} Completed "
+
         f"| Average Loss: {avg_loss:.4f}\n"
+    )
+
+    # ---------------------------------------------------
+    # Save Checkpoint
+    # ---------------------------------------------------
+
+    torch.save(
+
+        model.state_dict(),
+
+        f"checkpoint_epoch_{epoch+1}.pth"
+    )
+
+    print(
+
+        f"Checkpoint Saved: checkpoint_epoch_{epoch+1}.pth"
     )
 
 
 # ---------------------------------------------------
-# Save Model
+# Final Save
 # ---------------------------------------------------
 
 torch.save(
 
     model.state_dict(),
 
-    "hitformer_baseline.pth"
+    "hitformer_final.pth"
 )
 
-print("Model Saved Successfully!")
+print("\nTraining Completed Successfully!")
+
+print("Final Model Saved: hitformer_final.pth")

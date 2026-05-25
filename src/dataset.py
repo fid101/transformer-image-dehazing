@@ -1,133 +1,141 @@
 # src/dataset.py
 
-# PyTorch dataset base class
-from torch.utils.data import Dataset
-
-# PIL for image loading
-from PIL import Image
-
-# File handling
 import os
 
-# NumPy for OpenCV compatibility
-import numpy as np
+from PIL import Image
 
-# Torchvision transforms
-from torchvision import transforms
+from torch.utils.data import Dataset
 
-# RGB -> YUV conversion
-from preproccesing import rgb_to_yuv
-
-# TRE module
-from tre import texture_recovery
+import torchvision.transforms as transforms
 
 
 class DehazingDataset(Dataset):
 
     """
-    Custom Dataset for HITFormer Dehazing
+    RESIDE ITS Dataset Loader
 
-    Pipeline:
-        RGB
-        ↓
-        Resize
-        ↓
-        RGB -> YUV
-        ↓
-        TRE enhancement
-        ↓
-        Tensor conversion
+    Maps:
+        1_2_0.98.png
+    ->
+        1.png
     """
 
-    def __init__(self, hazy_dir, clean_dir, image_size=256):
+    def __init__(
 
-        """
-        Parameters:
-            hazy_dir  -> path to hazy images
-            clean_dir -> path to clean images
-            image_size -> resize dimension
-        """
+        self,
 
-        # Store dataset paths
+        hazy_dir,
+
+        clean_dir,
+
+        image_size=256
+
+    ):
+
         self.hazy_dir = hazy_dir
+
         self.clean_dir = clean_dir
 
-        # Read all image filenames
-        # Assumes matching filenames exist in both folders
-        self.image_names = os.listdir(hazy_dir)
+        # List all hazy images
+        self.hazy_images = sorted(
 
-        # Resize transform
-        #
-        # Neural networks require
-        # consistent image dimensions
-        self.resize = transforms.Resize((image_size, image_size))
+            os.listdir(hazy_dir)
+        )
 
-        # Convert image -> tensor
-        #
-        # Changes:
-        # H x W x C  ->  C x H x W
-        #
-        # Also normalizes:
-        # 0-255 -> 0-1
-        self.to_tensor = transforms.ToTensor()
+        # ---------------------------------------------------
+        # Image Transform
+        # ---------------------------------------------------
+
+        self.transform = transforms.Compose([
+
+            transforms.Resize(
+
+                (image_size, image_size)
+            ),
+
+            transforms.ToTensor()
+        ])
 
     def __len__(self):
 
-        """
-        Returns total dataset size.
-        """
-
-        return len(self.image_names)
+        return len(self.hazy_images)
 
     def __getitem__(self, idx):
 
+        # ---------------------------------------------------
+        # Hazy Image Name
+        # ---------------------------------------------------
+
+        hazy_name = self.hazy_images[idx]
+
         """
-        Fetch one training sample.
+        Example:
+
+        1_2_0.97842.png
         """
 
-        # Get filename
-        image_name = self.image_names[idx]
+        # ---------------------------------------------------
+        # Extract Clean Image ID
+        # ---------------------------------------------------
 
-        # Construct full image paths
-        hazy_path = os.path.join(self.hazy_dir, image_name)
-        clean_path = os.path.join(self.clean_dir, image_name)
+        clean_id = hazy_name.split("_")[0]
 
-        # Load images using PIL
-        #
-        # convert("RGB") ensures:
-        # 3-channel RGB format
-        hazy_image = Image.open(hazy_path).convert("RGB")
-        clean_image = Image.open(clean_path).convert("RGB")
+        """
+        "1"
+        """
 
-        # Resize images
-        #
-        # Resize works on PIL images
-        hazy_image = self.resize(hazy_image)
-        clean_image = self.resize(clean_image)
+        clean_name = clean_id + ".png"
 
-        # Convert PIL -> NumPy
-        #
-        # OpenCV operations require NumPy arrays
-        hazy_image = np.array(hazy_image)
-        clean_image = np.array(clean_image)
+        """
+        1.png
+        """
 
-        # RGB -> YUV conversion
-        #
-        # Following HITFormer preprocessing pipeline
-        hazy_image = rgb_to_yuv(hazy_image)
-        clean_image = rgb_to_yuv(clean_image)
+        # ---------------------------------------------------
+        # Full Paths
+        # ---------------------------------------------------
 
-        # Apply TRE enhancement
-        #
-        # Enhances texture/high-frequency details
-        hazy_image = texture_recovery(hazy_image)
-        clean_image = texture_recovery(clean_image)
+        hazy_path = os.path.join(
 
-        # Convert NumPy -> Tensor
-        #
-        # Neural networks operate on tensors
-        hazy_image = self.to_tensor(hazy_image)
-        clean_image = self.to_tensor(clean_image)
+            self.hazy_dir,
 
-        # Return paired sample
+            hazy_name
+        )
+
+        clean_path = os.path.join(
+
+            self.clean_dir,
+
+            clean_name
+        )
+
+        # ---------------------------------------------------
+        # Load Images
+        # ---------------------------------------------------
+
+        hazy_image = Image.open(
+
+            hazy_path
+
+        ).convert("RGB")
+
+        clean_image = Image.open(
+
+            clean_path
+
+        ).convert("RGB")
+
+        # ---------------------------------------------------
+        # Apply Transforms
+        # ---------------------------------------------------
+
+        hazy_image = self.transform(
+
+            hazy_image
+        )
+
+        clean_image = self.transform(
+
+            clean_image
+        )
+
         return hazy_image, clean_image

@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # ---------------------------------------------------
@@ -9,14 +10,6 @@ import torch.nn as nn
 # ---------------------------------------------------
 
 class PatchEmbedding(nn.Module):
-
-    """
-    Input:
-        [B, 3, H, W]
-
-    Output:
-        [B, 96, H/4, W/4]
-    """
 
     def __init__(
 
@@ -32,12 +25,11 @@ class PatchEmbedding(nn.Module):
 
         super().__init__()
 
-        # Patch extraction + feature projection
         self.proj = nn.Conv2d(
 
-            in_channels=in_channels,
+            in_channels,
 
-            out_channels=embed_dim,
+            embed_dim,
 
             kernel_size=patch_size,
 
@@ -46,9 +38,7 @@ class PatchEmbedding(nn.Module):
 
     def forward(self, x):
 
-        x = self.proj(x)
-
-        return x
+        return self.proj(x)
 
 
 # ---------------------------------------------------
@@ -56,14 +46,6 @@ class PatchEmbedding(nn.Module):
 # ---------------------------------------------------
 
 def window_partition(x, window_size=8):
-
-    """
-    Input:
-        [B, C, H, W]
-
-    Output:
-        [num_windows, window_size, window_size, C]
-    """
 
     B, C, H, W = x.shape
 
@@ -124,19 +106,8 @@ def window_reverse(
 
 ):
 
-    """
-    Reverse window partition.
-
-    Input:
-        [num_windows, win_h, win_w, C]
-
-    Output:
-        [B, C, H, W]
-    """
-
     C = windows.shape[-1]
 
-    # Restore window grid
     x = windows.view(
 
         B,
@@ -150,7 +121,6 @@ def window_reverse(
         C
     )
 
-    # Rearrange dimensions
     x = x.permute(
 
         0,
@@ -164,7 +134,6 @@ def window_reverse(
         4
     )
 
-    # Merge spatial windows
     x = x.reshape(
 
         B,
@@ -185,13 +154,6 @@ def window_reverse(
 
 def shift_window(x, shift_size=4):
 
-    """
-    Spatial cyclic shift.
-
-    Input:
-        [B, C, H, W]
-    """
-
     shifted_x = torch.roll(
 
         x,
@@ -209,13 +171,6 @@ def shift_window(x, shift_size=4):
 # ---------------------------------------------------
 
 class WindowAttention(nn.Module):
-
-    """
-    Swin-style local attention.
-
-    Input:
-        [num_windows, 8, 8, 96]
-    """
 
     def __init__(
 
@@ -240,10 +195,8 @@ class WindowAttention(nn.Module):
 
     def forward(self, x):
 
-        # Extract dimensions
         B_windows, H, W, C = x.shape
 
-        # Flatten windows into token sequences
         x = x.reshape(
 
             B_windows,
@@ -253,19 +206,13 @@ class WindowAttention(nn.Module):
             C
         )
 
-        """
-        [128, 64, 96]
-        """
+        attended, _ = self.attention(
 
-        # Self attention
-        attended, attention_weights = self.attention(
-
-            x,  # Query
-            x,  # Key
-            x   # Value
+            x,
+            x,
+            x
         )
 
-        # Restore spatial layout
         attended = attended.reshape(
 
             B_windows,
@@ -280,108 +227,552 @@ class WindowAttention(nn.Module):
 
 
 # ---------------------------------------------------
-# Reconstruction Head
+# Feed Forward MLP
 # ---------------------------------------------------
 
-class ReconstructionHead(nn.Module):
+class MLP(nn.Module):
 
-    """
-    Transformer features -> image reconstruction
+    def __init__(
 
-    Input:
-        [B, 96, 64, 64]
+        self,
 
-    Output:
-        [B, 3, 256, 256]
-    """
+        dim,
 
-    def __init__(self):
+        hidden_dim
+
+    ):
 
         super().__init__()
 
-        # 64x64 -> 128x128
-        self.up1 = nn.ConvTranspose2d(
+        self.net = nn.Sequential(
 
-            in_channels=96,
+            nn.Linear(
 
-            out_channels=48,
+                dim,
 
-            kernel_size=2,
+                hidden_dim
+            ),
 
-            stride=2
+            nn.GELU(),
+
+            nn.Linear(
+
+                hidden_dim,
+
+                dim
+            )
         )
 
-        # 128x128 -> 256x256
-        self.up2 = nn.ConvTranspose2d(
+    def forward(self, x):
 
-            in_channels=48,
+        return self.net(x)
 
-            out_channels=24,
 
-            kernel_size=2,
+# ---------------------------------------------------
+# Swin Transformer Block
+# ---------------------------------------------------
 
-            stride=2
+class SwinTransformerBlock(nn.Module):
+
+    def __init__(
+
+        self,
+
+        embed_dim=96,
+
+        num_heads=4,
+
+        window_size=8,
+
+        shift_size=0
+
+    ):
+
+        super().__init__()
+
+        self.window_size = window_size
+
+        self.shift_size = shift_size
+
+        self.norm1 = nn.LayerNorm(embed_dim)
+
+        self.attention = WindowAttention(
+
+            embed_dim=embed_dim,
+
+            num_heads=num_heads
         )
 
-        # Final image reconstruction
-        self.final = nn.Conv2d(
+        self.norm2 = nn.LayerNorm(embed_dim)
 
-            in_channels=24,
+        self.mlp = MLP(
 
-            out_channels=3,
+            dim=embed_dim,
+
+            hidden_dim=embed_dim * 4
+        )
+
+    def forward(self, x):
+
+        B, C, H, W = x.shape
+
+        residual = x
+
+        # Shift
+        if self.shift_size > 0:
+
+            x = shift_window(
+
+                x,
+
+                self.shift_size
+            )
+
+        # LayerNorm
+        x_ln = x.permute(
+
+            0,
+            2,
+            3,
+            1
+        )
+
+        x_ln = self.norm1(x_ln)
+
+        x = x_ln.permute(
+
+            0,
+            3,
+            1,
+            2
+        )
+
+        # Window Attention
+        windows = window_partition(
+
+            x,
+
+            self.window_size
+        )
+
+        attended = self.attention(windows)
+
+        x = window_reverse(
+
+            attended,
+
+            self.window_size,
+
+            H,
+
+            W,
+
+            B
+        )
+
+        # Reverse Shift
+        if self.shift_size > 0:
+
+            x = torch.roll(
+
+                x,
+
+                shifts=(
+
+                    self.shift_size,
+
+                    self.shift_size
+
+                ),
+
+                dims=(2, 3)
+            )
+
+        # Residual Attention
+        x = x + residual
+
+        # MLP Refinement
+        residual2 = x
+
+        x_mlp = x.permute(
+
+            0,
+            2,
+            3,
+            1
+        )
+
+        x_mlp = self.norm2(x_mlp)
+
+        x_mlp = self.mlp(x_mlp)
+
+        x_mlp = x_mlp.permute(
+
+            0,
+            3,
+            1,
+            2
+        )
+
+        x = residual2 + x_mlp
+
+        return x
+
+
+# ---------------------------------------------------
+# Residual Block
+# ---------------------------------------------------
+
+class ResidualBlock(nn.Module):
+
+    def __init__(self, channels):
+
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(
+
+            channels,
+
+            channels,
 
             kernel_size=3,
 
             padding=1
         )
 
-        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(
+
+            channels,
+
+            channels,
+
+            kernel_size=3,
+
+            padding=1
+        )
+
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
 
-        # First upsample
-        x = self.up1(x)
+        residual = x
+
+        x = self.conv1(x)
 
         x = self.relu(x)
 
-        """
-        [B, 48, 128, 128]
-        """
+        x = self.conv2(x)
 
-        # Second upsample
-        x = self.up2(x)
-
-        x = self.relu(x)
-
-        """
-        [B, 24, 256, 256]
-        """
-
-        # Final reconstruction
-        x = self.final(x)
-
-        """
-        [B, 3, 256, 256]
-        """
+        x = x + residual
 
         return x
-    # ---------------------------------------------------
-# Full HITFormer Model
+
+
+# ---------------------------------------------------
+# AHIP
 # ---------------------------------------------------
 
-class HITFormer(nn.Module):
+class AHIP_Block(nn.Module):
 
-    """
-    Full Transformer Dehazing Network
-    """
+    def __init__(self, channels):
+
+        super().__init__()
+
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        self.global_branch = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                channels // 4,
+
+                kernel_size=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels // 4,
+
+                channels,
+
+                kernel_size=1
+            )
+        )
+
+        self.local_branch = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            )
+        )
+
+        self.fusion = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=1
+            ),
+
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+
+        residual = x
+
+        global_feat = self.global_pool(x)
+
+        global_feat = self.global_branch(
+
+            global_feat
+        )
+
+        local_feat = self.local_branch(x)
+
+        haze_map = global_feat + local_feat
+
+        haze_weights = self.fusion(
+
+            haze_map
+        )
+
+        enhanced = x * haze_weights
+
+        output = enhanced + residual
+
+        return output
+
+
+# ---------------------------------------------------
+# SLCA
+# ---------------------------------------------------
+
+class SLCA_Block(nn.Module):
+
+    def __init__(self, channels):
+
+        super().__init__()
+
+        self.channel_attention = nn.Sequential(
+
+            nn.AdaptiveAvgPool2d(1),
+
+            nn.Conv2d(
+
+                channels,
+
+                channels // 8,
+
+                kernel_size=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels // 8,
+
+                channels,
+
+                kernel_size=1
+            ),
+
+            nn.Sigmoid()
+        )
+
+        self.spatial_attention = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                1,
+
+                kernel_size=7,
+
+                padding=3
+            ),
+
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+
+        channel_weights = self.channel_attention(x)
+
+        x = x * channel_weights
+
+        spatial_weights = self.spatial_attention(x)
+
+        x = x * spatial_weights
+
+        return x
+
+
+# ---------------------------------------------------
+# Reconstruction Decoder
+# ---------------------------------------------------
+
+class ReconstructionHead(nn.Module):
 
     def __init__(self):
 
         super().__init__()
 
-        # ---------------------------------------------------
-        # Patch Embedding
-        # ---------------------------------------------------
+        # Stage 1
+        self.up1 = nn.ConvTranspose2d(
+
+            96,
+
+            96,
+
+            kernel_size=2,
+
+            stride=2
+        )
+
+        self.refine1 = nn.Sequential(
+
+            nn.Conv2d(
+
+                96,
+
+                96,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            ResidualBlock(96),
+
+            ResidualBlock(96)
+        )
+
+        self.slca1 = SLCA_Block(96)
+
+        # Stage 2
+        self.up2 = nn.ConvTranspose2d(
+
+            96,
+
+            64,
+
+            kernel_size=2,
+
+            stride=2
+        )
+
+        self.refine2 = nn.Sequential(
+
+            nn.Conv2d(
+
+                64,
+
+                64,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            ResidualBlock(64),
+
+            ResidualBlock(64)
+        )
+
+        self.slca2 = SLCA_Block(64)
+
+        # Final RGB
+        self.final = nn.Sequential(
+
+            nn.Conv2d(
+
+                64,
+
+                32,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                32,
+
+                3,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+
+        x = self.up1(x)
+
+        x = self.refine1(x)
+
+        x = self.slca1(x)
+
+        x = self.up2(x)
+
+        x = self.refine2(x)
+
+        x = self.slca2(x)
+
+        output = self.final(x)
+
+        return output
+
+
+# ---------------------------------------------------
+# HITFormer
+# ---------------------------------------------------
+
+class HITFormer(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
 
         self.patch_embed = PatchEmbedding(
 
@@ -392,31 +783,47 @@ class HITFormer(nn.Module):
             patch_size=4
         )
 
-        # ---------------------------------------------------
-        # Attention Block
-        # ---------------------------------------------------
-
-        self.attention = WindowAttention(
+        # Hierarchical Swin Blocks
+        self.swin_block1 = SwinTransformerBlock(
 
             embed_dim=96,
 
-            num_heads=4
+            num_heads=4,
+
+            window_size=8,
+
+            shift_size=0
         )
 
-        # ---------------------------------------------------
-        # Reconstruction Decoder
-        # ---------------------------------------------------
+        self.swin_block2 = SwinTransformerBlock(
 
+            embed_dim=96,
+
+            num_heads=4,
+
+            window_size=8,
+
+            shift_size=4
+        )
+
+        self.swin_block3 = SwinTransformerBlock(
+
+            embed_dim=96,
+
+            num_heads=4,
+
+            window_size=8,
+
+            shift_size=0
+        )
+
+        # AHIP
+        self.ahip = AHIP_Block(96)
+
+        # Decoder
         self.decoder = ReconstructionHead()
 
     def forward(self, x):
-
-        """
-        Input:
-            [B, 3, 256, 256]
-        """
-
-        B = x.shape[0]
 
         # ---------------------------------------------------
         # Patch Embedding
@@ -424,96 +831,35 @@ class HITFormer(nn.Module):
 
         features = self.patch_embed(x)
 
-        """
-        [B, 96, 64, 64]
-        """
+        # Save shallow features
+        skip_features = features
 
         # ---------------------------------------------------
-        # Window Attention
+        # Hierarchical Swin
         # ---------------------------------------------------
 
-        windows = window_partition(
+        features = self.swin_block1(features)
 
-            features,
+        features = self.swin_block2(features)
 
-            window_size=8
-        )
-
-        attended = self.attention(windows)
+        features = self.swin_block3(features)
 
         # ---------------------------------------------------
-        # Reverse Windows
+        # AHIP
         # ---------------------------------------------------
 
-        restored = window_reverse(
-
-            attended,
-
-            window_size=8,
-
-            H=64,
-
-            W=64,
-
-            B=B
-        )
-
-        """
-        [B, 96, 64, 64]
-        """
+        features = self.ahip(features)
 
         # ---------------------------------------------------
-        # Shifted Window Attention
+        # Skip Fusion
         # ---------------------------------------------------
 
-        shifted = shift_window(
-
-            restored,
-
-            shift_size=4
-        )
-
-        shifted_windows = window_partition(
-
-            shifted,
-
-            window_size=8
-        )
-
-        shifted_attention = self.attention(
-
-            shifted_windows
-        )
-
-        # ---------------------------------------------------
-        # Reverse Shifted Windows
-        # ---------------------------------------------------
-
-        final_features = window_reverse(
-
-            shifted_attention,
-
-            window_size=8,
-
-            H=64,
-
-            W=64,
-
-            B=B
-        )
-
-        """
-        [B, 96, 64, 64]
-        """
+        features = features + skip_features
 
         # ---------------------------------------------------
         # Reconstruction
         # ---------------------------------------------------
 
-        output = self.decoder(final_features)
-
-        """
-        [B, 3, 256, 256]
-        """
+        output = self.decoder(features)
 
         return output
