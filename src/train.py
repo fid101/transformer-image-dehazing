@@ -6,6 +6,8 @@ import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
 
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 from dataset import DehazingDataset
 
 from model import HITFormer
@@ -39,7 +41,11 @@ train_loader = DataLoader(
 
     batch_size=1,
 
-    shuffle=True
+    shuffle=True,
+
+    num_workers=4,
+
+    pin_memory=True
 )
 
 
@@ -84,7 +90,7 @@ class PSNRLoss(nn.Module):
 class SSIMLoss(nn.Module):
 
     """
-    Lightweight SSIM approximation
+    Lightweight SSIM Approximation
     """
 
     def __init__(self):
@@ -146,15 +152,24 @@ optimizer = torch.optim.Adam(
 
     model.parameters(),
 
-    lr=5e-5
+    lr=1e-4
 )
 
 
 # ---------------------------------------------------
-# Epochs
+# Scheduler
 # ---------------------------------------------------
 
-epochs = 8
+epochs = 10
+
+scheduler = CosineAnnealingLR(
+
+    optimizer,
+
+    T_max=epochs,
+
+    eta_min=1e-6
+)
 
 
 # ---------------------------------------------------
@@ -171,7 +186,10 @@ for epoch in range(epochs):
 
     for batch_idx, (hazy, clean) in enumerate(train_loader):
 
-        # Move to GPU
+        # ---------------------------------------------------
+        # Move To GPU
+        # ---------------------------------------------------
+
         hazy = hazy.to(device)
 
         clean = clean.to(device)
@@ -207,7 +225,10 @@ for epoch in range(epochs):
             clean
         )
 
+        # ---------------------------------------------------
         # Final Combined Loss
+        # ---------------------------------------------------
+
         loss = (
 
             1.0 * loss_l1
@@ -229,7 +250,10 @@ for epoch in range(epochs):
 
         loss.backward()
 
+        # ---------------------------------------------------
         # Gradient Clipping
+        # ---------------------------------------------------
+
         torch.nn.utils.clip_grad_norm_(
 
             model.parameters(),
@@ -247,14 +271,24 @@ for epoch in range(epochs):
 
         if batch_idx % 100 == 0:
 
+            current_lr = optimizer.param_groups[0]['lr']
+
             print(
 
                 f"Epoch [{epoch+1}/{epochs}] "
 
                 f"Batch [{batch_idx}/{len(train_loader)}] "
 
-                f"Loss: {loss.item():.4f}"
+                f"Loss: {loss.item():.4f} "
+
+                f"LR: {current_lr:.7f}"
             )
+
+    # ---------------------------------------------------
+    # Scheduler Step
+    # ---------------------------------------------------
+
+    scheduler.step()
 
     # ---------------------------------------------------
     # Epoch Summary
@@ -275,14 +309,22 @@ for epoch in range(epochs):
 
     torch.save(
 
-        model.state_dict(),
+        {
 
-        f"checkpoint_epoch_{epoch+1}.pth"
+            'epoch': epoch + 1,
+
+            'model_state_dict': model.state_dict(),
+
+            'optimizer_state_dict': optimizer.state_dict(),
+
+        },
+
+        f"checkpoint_lslca_epoch_{epoch+1}.pth"
     )
 
     print(
 
-        f"Checkpoint Saved: checkpoint_epoch_{epoch+1}.pth"
+        f"Checkpoint Saved: checkpoint_lslca_epoch_{epoch+1}.pth"
     )
 
 
@@ -290,13 +332,14 @@ for epoch in range(epochs):
 # Final Save
 # ---------------------------------------------------
 
+
 torch.save(
 
     model.state_dict(),
 
-    "hitformer_final.pth"
+    "hitformer_slca_final.pth"
 )
 
 print("\nTraining Completed Successfully!")
 
-print("Final Model Saved: hitformer_final.pth")
+print("Final Model Saved: hitformer_lslca_final.pth")

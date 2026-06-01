@@ -6,10 +6,12 @@ __pycache__/
 .env
 .venv
 
+datasets_small/
 datasets/
 checkpoints/
 outputs/
 logs/
+results/
 
 .ipynb_checkpoints/
 

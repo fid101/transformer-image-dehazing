@@ -469,6 +469,55 @@ class ResidualBlock(nn.Module):
 
 
 # ---------------------------------------------------
+# TRE MODULE
+# ---------------------------------------------------
+
+# ---------------------------------------------------
+# TRE MODULE (OLD STABLE VERSION)
+# ---------------------------------------------------
+
+class TREModule(nn.Module):
+
+    def __init__(self, channels=3):
+
+        super().__init__()
+
+        self.conv = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            )
+        )
+
+    def forward(self, x):
+
+        texture = self.conv(x)
+
+        output = x + texture
+
+        return output
+
+# ---------------------------------------------------
 # AHIP
 # ---------------------------------------------------
 
@@ -575,11 +624,19 @@ class AHIP_Block(nn.Module):
 # SLCA
 # ---------------------------------------------------
 
+# ---------------------------------------------------
+# SLCA BLOCK (UPGRADED VERSION)
+# ---------------------------------------------------
+
 class SLCA_Block(nn.Module):
 
     def __init__(self, channels):
 
         super().__init__()
+
+        # ---------------------------------------------------
+        # Channel Attention
+        # ---------------------------------------------------
 
         self.channel_attention = nn.Sequential(
 
@@ -608,34 +665,154 @@ class SLCA_Block(nn.Module):
             nn.Sigmoid()
         )
 
+        # ---------------------------------------------------
+        # Spatial Attention
+        # ---------------------------------------------------
+
         self.spatial_attention = nn.Sequential(
 
             nn.Conv2d(
 
                 channels,
 
+                channels // 4,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels // 4,
+
                 1,
 
-                kernel_size=7,
+                kernel_size=3,
 
-                padding=3
+                padding=1
             ),
 
             nn.Sigmoid()
         )
 
+        # ---------------------------------------------------
+        # Luminance Refinement Branch
+        # ---------------------------------------------------
+
+        self.luminance_branch = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            )
+        )
+
+        # ---------------------------------------------------
+        # Feature Fusion
+        # ---------------------------------------------------
+
+        self.fusion = nn.Sequential(
+
+            nn.Conv2d(
+
+                channels * 2,
+
+                channels,
+
+                kernel_size=1
+            ),
+
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+
+                channels,
+
+                channels,
+
+                kernel_size=3,
+
+                padding=1
+            )
+        )
+
     def forward(self, x):
+
+        residual = x
+
+        # ---------------------------------------------------
+        # Channel Attention
+        # ---------------------------------------------------
 
         channel_weights = self.channel_attention(x)
 
-        x = x * channel_weights
+        x_channel = x * channel_weights
 
-        spatial_weights = self.spatial_attention(x)
+        # ---------------------------------------------------
+        # Spatial Attention
+        # ---------------------------------------------------
 
-        x = x * spatial_weights
+        spatial_weights = self.spatial_attention(x_channel)
 
-        return x
+        x_spatial = x_channel * spatial_weights
 
+        # ---------------------------------------------------
+        # Luminance Refinement
+        # ---------------------------------------------------
+
+        luminance_features = self.luminance_branch(
+
+            x_spatial
+        )
+
+        # ---------------------------------------------------
+        # Feature Fusion
+        # ---------------------------------------------------
+
+        fused = torch.cat(
+
+            [
+
+                x_spatial,
+
+                luminance_features
+
+            ],
+
+            dim=1
+        )
+
+        out = self.fusion(fused)
+
+        # ---------------------------------------------------
+        # Residual Refinement
+        # ---------------------------------------------------
+
+        out = out + residual
+
+        return out
 
 # ---------------------------------------------------
 # Reconstruction Decoder
@@ -647,7 +824,6 @@ class ReconstructionHead(nn.Module):
 
         super().__init__()
 
-        # Stage 1
         self.up1 = nn.ConvTranspose2d(
 
             96,
@@ -681,7 +857,6 @@ class ReconstructionHead(nn.Module):
 
         self.slca1 = SLCA_Block(96)
 
-        # Stage 2
         self.up2 = nn.ConvTranspose2d(
 
             96,
@@ -715,7 +890,6 @@ class ReconstructionHead(nn.Module):
 
         self.slca2 = SLCA_Block(64)
 
-        # Final RGB
         self.final = nn.Sequential(
 
             nn.Conv2d(
@@ -774,6 +948,10 @@ class HITFormer(nn.Module):
 
         super().__init__()
 
+        # TRE
+        self.tre = TREModule(3)
+
+        # Patch Embedding
         self.patch_embed = PatchEmbedding(
 
             in_channels=3,
@@ -825,41 +1003,29 @@ class HITFormer(nn.Module):
 
     def forward(self, x):
 
-        # ---------------------------------------------------
-        # Patch Embedding
-        # ---------------------------------------------------
+        # TRE
+        x = self.tre(x)
 
+        # Patch Embedding
         features = self.patch_embed(x)
 
         # Save shallow features
         skip_features = features
 
-        # ---------------------------------------------------
         # Hierarchical Swin
-        # ---------------------------------------------------
-
         features = self.swin_block1(features)
 
         features = self.swin_block2(features)
 
         features = self.swin_block3(features)
 
-        # ---------------------------------------------------
         # AHIP
-        # ---------------------------------------------------
-
         features = self.ahip(features)
 
-        # ---------------------------------------------------
         # Skip Fusion
-        # ---------------------------------------------------
-
         features = features + skip_features
 
-        # ---------------------------------------------------
         # Reconstruction
-        # ---------------------------------------------------
-
         output = self.decoder(features)
 
         return output

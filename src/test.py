@@ -29,7 +29,7 @@ model.load_state_dict(
 
     torch.load(
 
-        "hitformer_final.pth",
+        "hitformer_slca_final.pth",
 
         map_location=device
     )
