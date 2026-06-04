@@ -1,0 +1,401 @@
+# src/train.py
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+from torch.utils.data import DataLoader
+from pytorch_msssim import ssim
+
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+from dataset import DehazingDataset
+
+from model import HITFormer
+import torchvision.models as models
+
+
+# ---------------------------------------------------
+# Device
+# ---------------------------------------------------
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+print("Using Device:", device)
+
+
+# ---------------------------------------------------
+# Dataset
+# ---------------------------------------------------
+
+train_dataset = DehazingDataset(
+
+    hazy_dir="datasets_small/train/hazy",
+
+    clean_dir="datasets_small/train/clear",
+
+    image_size=256
+)
+
+train_loader = DataLoader(
+
+    train_dataset,
+
+    batch_size=1,
+
+    shuffle=True,
+
+    num_workers=4,
+
+    pin_memory=True
+)
+
+
+# ---------------------------------------------------
+# Model
+# ---------------------------------------------------
+
+model = HITFormer().to(device)
+
+
+print("Model Loaded Successfully!")
+
+print("Loading Previous Best Model...")
+
+model.load_state_dict(
+    torch.load(
+        "hitformer_ssim5_final.pth",
+        map_location=device
+    )
+)
+
+print("Checkpoint Loaded Successfully!")
+
+
+# ---------------------------------------------------
+# PSNR Loss
+# ---------------------------------------------------
+
+class PSNRLoss(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+    def forward(self, pred, target):
+
+        mse = torch.mean(
+
+            (pred - target) ** 2
+        )
+
+        psnr = 10 * torch.log10(
+
+            1.0 / (mse + 1e-8)
+        )
+
+        return -psnr
+
+
+# ---------------------------------------------------
+# SSIM Loss
+# ---------------------------------------------------
+
+class SSIMLoss(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, target):
+
+        return 1 - ssim(
+            pred,
+            target,
+            data_range=1.0,
+            size_average=True
+        )
+    #---------------------------------------------------
+    # color loss
+    #---------------------------------------------------
+class ColorLoss(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, target):
+
+        pred_mean = pred.mean(dim=[2, 3])
+
+        target_mean = target.mean(dim=[2, 3])
+
+        return torch.mean(
+            torch.abs(
+                pred_mean - target_mean
+            )
+        )
+#----------------------------------------------------
+# perceptual loss
+#----------------------------------------------------
+class PerceptualLoss(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+
+        self.features = nn.Sequential(
+            *list(vgg.features[:16])
+        ).eval()
+
+        for param in self.features.parameters():
+            param.requires_grad = False
+
+        self.features = self.features.to(device)
+
+        self.criterion = nn.L1Loss()
+
+    def forward(self, pred, target):
+
+        pred_feat = self.features(pred)
+
+        target_feat = self.features(target)
+
+        return self.criterion(
+            pred_feat,
+            target_feat
+        )
+
+# ---------------------------------------------------
+# Loss Functions
+# ---------------------------------------------------
+
+l1_loss = nn.L1Loss()
+
+mse_loss = nn.MSELoss()
+
+psnr_loss = PSNRLoss()
+
+ssim_loss = SSIMLoss()
+
+color_loss = ColorLoss()
+
+perceptual_loss = PerceptualLoss()
+
+
+
+
+# ---------------------------------------------------
+# Optimizer
+# ---------------------------------------------------
+
+optimizer = torch.optim.Adam(
+
+    model.parameters(),
+
+    lr=1e-4
+)
+
+
+# ---------------------------------------------------
+# Scheduler
+# ---------------------------------------------------
+
+epochs = 3
+
+scheduler = CosineAnnealingLR(
+
+    optimizer,
+
+    T_max=epochs,
+
+    eta_min=1e-6
+)
+
+
+# ---------------------------------------------------
+# Training Loop
+# ---------------------------------------------------
+
+for epoch in range(epochs):
+
+    model.train()
+
+    epoch_loss = 0.0
+
+    print(f"\nStarting Epoch {epoch+1}/{epochs}\n")
+
+    for batch_idx, (hazy, clean) in enumerate(train_loader):
+
+        # ---------------------------------------------------
+        # Move To GPU
+        # ---------------------------------------------------
+
+        hazy = hazy.to(device)
+
+        clean = clean.to(device)
+
+        # ---------------------------------------------------
+        # Forward Pass
+        # ---------------------------------------------------
+
+        output = model(hazy)
+
+        # ---------------------------------------------------
+        # Combined Loss
+        # ---------------------------------------------------
+
+        loss_l1 = l1_loss(
+            output,
+            clean
+        )
+
+        loss_mse = mse_loss(
+            output,
+            clean
+        )
+
+        loss_psnr = psnr_loss(
+            output,
+            clean
+        )
+
+        loss_ssim = ssim_loss(
+            output,
+            clean
+        )
+
+        loss_color = color_loss(
+            output,
+            clean
+        )
+
+        loss_perceptual = perceptual_loss(
+            output,
+            clean
+        )
+
+
+        # ---------------------------------------------------
+        # Final Combined Loss
+        # ---------------------------------------------------
+
+        loss = (
+            1.0 * loss_l1
+            +
+            
+            
+            0.1 * loss_psnr
+            +
+            0.5 * loss_ssim
+            +
+            0.1 * loss_color
+            +
+            0.01 * loss_perceptual
+        )
+
+        # ---------------------------------------------------
+        # Backpropagation
+        # ---------------------------------------------------
+
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        # ---------------------------------------------------
+        # Gradient Clipping
+        # ---------------------------------------------------
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0
+        )
+
+        optimizer.step()
+
+     
+        
+
+        optimizer.step()
+  
+        # ---------------------------------------------------
+        # Logging
+        # ---------------------------------------------------
+
+        epoch_loss += loss.item()
+
+        if batch_idx % 100 == 0:
+
+            current_lr = optimizer.param_groups[0]['lr']
+
+            print(
+
+                f"Epoch [{epoch+1}/{epochs}] "
+
+                f"Batch [{batch_idx}/{len(train_loader)}] "
+
+                f"Loss: {loss.item():.4f} "
+
+                f"LR: {current_lr:.7f}"
+            )
+
+    # ---------------------------------------------------
+    # Scheduler Step
+    # ---------------------------------------------------
+
+    scheduler.step()
+
+    # ---------------------------------------------------
+    # Epoch Summary
+    # ---------------------------------------------------
+
+    avg_loss = epoch_loss / len(train_loader)
+
+    print(
+
+        f"\nEpoch {epoch+1} Completed "
+
+        f"| Average Loss: {avg_loss:.4f}\n"
+    )
+
+    # ---------------------------------------------------
+    # Save Checkpoint
+    # ---------------------------------------------------
+
+    torch.save(
+
+        {
+
+            'epoch': epoch + 1,
+
+            'model_state_dict': model.state_dict(),
+
+            'optimizer_state_dict': optimizer.state_dict(),
+
+        },
+
+        f"checkpoint_ssim6_epoch_{epoch+1}.pth"
+    )
+
+    print(
+
+        f"Checkpoint Saved: checkpoint_ssim5_epoch_{epoch+1}.pth"
+    )
+
+
+# ---------------------------------------------------
+# Final Save
+# ---------------------------------------------------
+
+
+torch.save(
+
+    model.state_dict(),
+
+    "hitformer_ssim6_final.pth"
+)
+
+print("\nTraining Completed Successfully!")
+
+print("Final Model Saved: hitformer_ssim4_final.pth")
